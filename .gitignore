@@ -1,0 +1,15 @@
+# Secrets — never commit real credentials
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated demo artifacts
+output/
+
+# OS noise
+.DS_Store
