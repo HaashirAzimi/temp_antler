@@ -1,6 +1,6 @@
-# Secrets — never commit real credentials
+# Local override (optional; committed env file is used by default)
 .env
-env
+.streamlit/secrets.toml
 
 # Python
 __pycache__/

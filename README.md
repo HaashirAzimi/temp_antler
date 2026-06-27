@@ -16,15 +16,34 @@ Watch → Decide → Act → Report. Every decision is a live VLM call — no ha
 
 Plus **⚖️ Critic** — independent VLM audit before any system write.
 
-## Run it
+## Run it locally
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # add VLLM_URL, VLLM_KEY, VLLM_MODEL
+# VLM credentials are in the committed `env` file (auto-loaded)
 
 python3 -m streamlit run app.py   # dashboard (upload CCTV clip)
 python3 run.py                    # terminal demo on data/ frames
 ```
+
+## Deploy (GitHub + live app)
+
+**GitHub Pages (`*.github.io`) only hosts static HTML** — it cannot run this Streamlit app, Python, YOLO, or VLM calls. Use two pieces:
+
+| What | Where | URL |
+|------|--------|-----|
+| Landing page | GitHub Pages (`docs/`) | `https://haashirazimi.github.io/temp_antler/` |
+| Live dashboard | [Streamlit Community Cloud](https://share.streamlit.io) | `https://<your-app>.streamlit.app` |
+
+### 1. Enable GitHub Pages
+
+Repo → **Settings** → **Pages** → Source: **GitHub Actions** (workflow in `.github/workflows/pages.yml` deploys `docs/` on every push to `main`).
+
+### 2. Deploy the dashboard on Streamlit Cloud
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+2. **New app** → repo `HaashirAzimi/temp_antler`, branch `main`, main file `app.py`.
+3. Deploy — credentials load from the committed `env` file. Update the button link in `docs/index.html` to your Streamlit URL.
 
 **Dashboard:** upload a factory clip (or use sample frames in `data/`), hit **▶ START SHIFT**.
 Video plays while agents scan frames, the hub lights up, and incidents/NCRs/WOs land on the board.

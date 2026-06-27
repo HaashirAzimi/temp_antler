@@ -15,13 +15,26 @@ import subprocess
 import mimetypes
 import requests
 
-# Load VLLM_URL / VLLM_KEY / VLLM_MODEL from a .env file so the project works in
-# any shell (terminal demo or Streamlit) without manual `source`. Optional dep.
+# Load credentials from env / .env in repo, or Streamlit Cloud secrets when deployed.
 try:
     from dotenv import load_dotenv
+    load_dotenv("env")
     load_dotenv()
 except ImportError:
     pass
+
+
+def _load_streamlit_secrets():
+    try:
+        import streamlit as st
+        for key in ("VLLM_URL", "VLLM_KEY", "VLLM_MODEL"):
+            if key in st.secrets and not os.environ.get(key):
+                os.environ[key] = str(st.secrets[key])
+    except Exception:
+        pass
+
+
+_load_streamlit_secrets()
 
 
 class VLMError(RuntimeError):
