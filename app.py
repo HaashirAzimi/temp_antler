@@ -13,6 +13,15 @@ import datetime
 
 import streamlit as st
 
+from flask import Flask
+
+# This MUST be at the top level! Vercel is looking for this exact variable.
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return 'Hello World!'
+
 try:
     import cv2
 except ImportError:
