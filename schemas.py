@@ -1,9 +1,9 @@
 """
 schemas.py — payload builders that mirror real factory systems.
 
-These produce dicts shaped like the records IBM Maximo (work orders) and
-SafetyCulture (incidents) actually store, so the demo writes look authentic
-to an operations manager.
+These produce dicts shaped like the records IBM Maximo (work orders),
+SafetyCulture (incidents), MasterControl (quality), Manhattan WMS
+(inventory), and a TMS dispatch board actually store.
 """
 
 import uuid
@@ -18,14 +18,17 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def make_maximo_work_order(asset_id, fault, priority, reported_by):
-    """
-    Build an IBM Maximo work order record.
+def _norm_severity(severity):
+    sev = str(severity).upper().strip()
+    aliases = {"MEDIUM": "MED", "MODERATE": "MED", "CRIT": "CRITICAL",
+               "SEVERE": "CRITICAL"}
+    sev = aliases.get(sev, sev)
+    if sev not in ("LOW", "MED", "HIGH", "CRITICAL"):
+        sev = "MED"
+    return sev
 
-    priority is clamped to Maximo's 1 (highest) .. 4 (lowest) scale.
-    status WAPPR = "Waiting on Approval", the default for a new CM order.
-    worktype CM = Corrective Maintenance (reactive repair).
-    """
+
+def make_maximo_work_order(asset_id, fault, priority, reported_by):
     try:
         pri = int(priority)
     except (TypeError, ValueError):
@@ -46,19 +49,7 @@ def make_maximo_work_order(asset_id, fault, priority, reported_by):
 
 
 def make_safetyculture_incident(hazard, severity, location, osha_category):
-    """
-    Build a SafetyCulture incident record.
-
-    severity is normalized to LOW / MED / HIGH / CRITICAL.
-    osha_recordable is inferred from severity (HIGH/CRITICAL are recordable).
-    """
-    sev = str(severity).upper().strip()
-    aliases = {"MEDIUM": "MED", "MODERATE": "MED", "CRIT": "CRITICAL",
-               "SEVERE": "CRITICAL"}
-    sev = aliases.get(sev, sev)
-    if sev not in ("LOW", "MED", "HIGH", "CRITICAL"):
-        sev = "MED"
-
+    sev = _norm_severity(severity)
     recordable = sev in ("HIGH", "CRITICAL")
 
     return {
@@ -72,4 +63,43 @@ def make_safetyculture_incident(hazard, severity, location, osha_category):
         "reported_at": _now_iso(),
         "corrective_action": "Pending assignment",
         "status": "OPEN",
+    }
+
+
+def make_mastercontrol_reject(defect, severity, batch_id, disposition):
+    sev = _norm_severity(severity)
+    return {
+        "ncr_id": "NCR-" + _short_id(),
+        "defect_type": defect,
+        "severity": sev,
+        "batch_id": batch_id or "BATCH-UNKNOWN",
+        "disposition": disposition or "QUARANTINE",
+        "reported_at": _now_iso(),
+        "status": "OPEN",
+        "capa_required": sev in ("HIGH", "CRITICAL"),
+    }
+
+
+def make_wms_inventory_flag(issue, sku, location, variance):
+    return {
+        "flag_id": "INV-" + _short_id(),
+        "issue_type": issue,
+        "sku": sku or "SKU-UNKNOWN",
+        "location": location or "Unknown",
+        "variance_units": variance,
+        "reported_at": _now_iso(),
+        "status": "OPEN",
+        "fefo_risk": "near_expiry" in (issue or "").lower(),
+    }
+
+
+def make_dispatch_alert(alert_type, zone, vehicle, action):
+    return {
+        "dispatch_id": "DSP-" + _short_id(),
+        "alert_type": alert_type,
+        "zone": zone or "Unknown",
+        "vehicle_id": vehicle or "N/A",
+        "recommended_action": action or "Hold traffic",
+        "reported_at": _now_iso(),
+        "status": "ACTIVE",
     }

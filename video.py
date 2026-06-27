@@ -71,6 +71,30 @@ def extract_frames(video_path, every_n_seconds=2, out_dir=None, seq_name=None):
     return sorted(written)
 
 
+def annotate_frame(path, label, color=(34, 211, 238), sublabel=""):
+    """Return a JPEG bytes buffer with an agent overlay for live analysis display."""
+    if not HAVE_CV2:
+        with open(path, "rb") as fh:
+            return fh.read()
+    img = cv2.imread(path)
+    if img is None:
+        with open(path, "rb") as fh:
+            return fh.read()
+    h, w = img.shape[:2]
+    overlay = img.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 52), (10, 14, 20), -1)
+    cv2.addWeighted(overlay, 0.75, img, 0.25, 0, img)
+    cv2.rectangle(img, (0, 0), (w - 1, h - 1), color, 3)
+    cv2.putText(img, label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                color, 2, cv2.LINE_AA)
+    if sublabel:
+        cv2.rectangle(img, (0, h - 36), (w, h), (10, 14, 20), -1)
+        cv2.putText(img, sublabel[:90], (12, h - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, (200, 210, 220), 1, cv2.LINE_AA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return buf.tobytes() if ok else open(path, "rb").read()
+
+
 def _next_seq_name(out_dir):
     """Pick the next free seqN prefix in out_dir."""
     nums = []

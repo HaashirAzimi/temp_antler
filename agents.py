@@ -1,32 +1,53 @@
 """
-agents.py — the 3-agent crew that runs a factory shift.
+agents.py — the 6-agent floor crew + critic for a factory shift.
 
-    ShiftSupervisor (orchestrator)  -> watches the feed, decides who to deploy
-    SafetyOfficer   (subagent)      -> EHS: hazards, OSHA, SafetyCulture
-    MaintenanceTech (subagent)      -> equipment faults, Maximo work orders
-    Critic          (autonomy gate) -> independent second opinion before commit
+    Shift Supervisor (03)  -> orchestrator: watches feed, deploys specialists
+    Safety Officer   (01)  -> EHS: hazards, OSHA, SafetyCulture
+    Quality Inspector(02)  -> QC: defects, quarantine, MasterControl NCR
+    Inventory Clerk  (04)  -> WMS: miscounts, damage, near-expiry flags
+    Maintenance Tech (05)  -> CMMS: equipment faults, Maximo work orders
+    Floor Dispatcher (06)  -> TMS: vehicle/pedestrian conflicts, dock flow
+    Critic                 -> independent gate before any system write
 
-Every decision is a live VLM call with a distinct persona. Nothing is trained,
-nothing is a hardcoded rule on pixels. The Python only routes the model's
-conclusions to the right "system" and persists them.
-
-The whole shift loop is `run_shift(sequences, emit)`. `emit` is a callback that
-receives structured events as they happen, so the SAME loop powers both the
-terminal demo (run.py) and the Streamlit control room (app.py).
+Every decision is a live VLM call. Python only routes conclusions to systems.
 """
 
 import os
 import json
 
 from vlm import ask_vlm
-from schemas import make_maximo_work_order, make_safetyculture_incident
+from detect import format_for_vlm, scan_frames
+from schemas import (
+    make_dispatch_alert,
+    make_mastercontrol_reject,
+    make_maximo_work_order,
+    make_safetyculture_incident,
+    make_wms_inventory_flag,
+)
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 SEV_ORDER = {"LOW": 1, "MED": 2, "HIGH": 3, "CRITICAL": 4}
 
+EVIDENCE_RULES = (
+    "GROUND TRUTH RULES:\n"
+    "  - Combine TRAINED PPE DETECTOR output (bounding boxes) with your visual review.\n"
+    "  - If the detector reports NO-Hardhat / NO-Safety Vest / Fall-Detected, treat as "
+    "real unless frames clearly contradict it — deploy safety.\n"
+    "  - Do NOT invent smoke, fire, or leaks without clear pixel evidence.\n"
+    "  - Normal forklift operation alone is NOT an incident.\n"
+    "  - If no detector hits AND nothing looks wrong, set event_detected=false."
+)
 
-# --- persistence helpers -----------------------------------------------------
+# deploy route -> (class, system key, display name, icon, commit filename)
+ROUTE_MAP = {
+    "safety": ("SafetyOfficer", "safety", "Safety Officer", "🦺", "incidents.json"),
+    "quality": ("QualityInspector", "quality", "Quality Inspector", "🔬", "quality_ncrs.json"),
+    "inventory": ("InventoryClerk", "inventory", "Inventory Clerk", "📦", "inventory_flags.json"),
+    "maintenance": ("MaintenanceTech", "maintenance", "Maintenance Technician", "🔧", "work_orders.json"),
+    "dispatch": ("FloorDispatcher", "dispatch", "Floor Dispatcher", "🚛", "dispatch_alerts.json"),
+}
+
 
 def _append_json(filename, record):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -47,12 +68,9 @@ def _append_json(filename, record):
 
 
 def _emit(emit, kind, **payload):
-    """Safely fire an event to the UI/console callback."""
     if emit:
         emit(dict(kind=kind, **payload))
 
-
-# --- shared OSHA reference (the model CHOOSES from this, we don't decide) -----
 
 OSHA_REFERENCE = """Common OSHA 29 CFR categories to choose the best fit from:
 - 1910.132  General PPE requirements
@@ -68,48 +86,46 @@ OSHA_REFERENCE = """Common OSHA 29 CFR categories to choose the best fit from:
 
 
 # =============================================================================
-# 1. Shift Supervisor — the orchestrator (Role 03)
+# Shift Supervisor — orchestrator (Role 03)
 # =============================================================================
 
 class ShiftSupervisor:
     PERSONA = (
         "You are the SHIFT SUPERVISOR running a factory control room. You watch "
         "the camera feed over time and reason about what is CHANGING across "
-        "frames. You do not fix anything yourself — you DEPLOY specialists: a "
-        "Safety Officer for people-safety hazards, a Maintenance Technician for "
-        "equipment faults. You are calm, decisive, and you justify every "
-        "deployment in one or two sentences a floor manager would respect."
+        "frames. You do not fix anything yourself — you DEPLOY floor specialists. "
+        "You are calm, decisive, and conservative — you only deploy when evidence "
+        "is clear. You justify every deployment in one or two sentences a floor "
+        "manager would respect."
     )
 
-    def observe(self, frame_paths):
+    def observe(self, frame_paths, cv_scan=None):
+        cv_block = ""
+        if cv_scan:
+            cv_block = (
+                "\n\nTRAINED PPE DETECTOR (YOLO, Roboflow-trained weights):\n"
+                + format_for_vlm(cv_scan) + "\n"
+            )
         prompt = (
+            "%s%s\n\n"
             "These images are consecutive frames from one fixed factory camera, "
             "in chronological order (earliest first). Reason about what CHANGES "
-            "over time — movement, posture, PPE, equipment state, gauges, smoke, "
-            "spills, forklifts near people. A real event reveals itself through "
-            "change, not a single snapshot.\n\n"
-            "Inspect carefully and specifically, like a real floor supervisor:\n"
-            "  - Each PERSON: are they wearing required PPE for the area "
-            "(hard hat, hi-vis vest, eye protection)? Any unsafe act, working "
-            "at height without fall protection, or person in a danger zone?\n"
-            "  - Each VEHICLE (forklift/pallet jack): operated safely, forks "
-            "lowered when parked, clear of pedestrians, load stable?\n"
-            "  - The ENVIRONMENT: smoke, fire, spills, blocked aisles, unstable "
-            "stacks, gauges or warning lights, leaks, a stalled line.\n\n"
-            "Do not invent hazards that are not there — but do not gloss over a "
-            "real one. Decide who to deploy:\n"
-            "  'safety'      -> a person-safety hazard (missing PPE, forklift "
-            "near a person, fire/smoke, spill, fall risk, person down)\n"
-            "  'maintenance' -> an equipment fault (machine smoke, gauge in the "
-            "red, leak, stalled/struggling line, fault light)\n"
-            "  'none'        -> nothing actionable\n\n"
-            "Return JSON with exactly these keys: "
-            "{\"summary\": what changes across the frames, "
-            "\"event_detected\": bool, "
-            "\"event_type\": short snake_case label, "
-            "\"severity\": one of 'LOW','MED','HIGH','CRITICAL', "
-            "\"deploy\": one of 'safety','maintenance','none', "
-            "\"reasoning\": the specific visual evidence for your decision}"
+            "over time.\n\n"
+            "Inspect like a real floor supervisor:\n"
+            "  - PEOPLE & PPE: missing hard hat / hi-vis vest — trust detector NO-* hits\n"
+            "  - VEHICLES: forklift genuinely endangering a pedestrian (not normal ops)\n"
+            "  - QUALITY: visible defects, damaged packaging on line\n"
+            "  - INVENTORY: damaged cartons, blocked aisles, overstacking\n"
+            "  - EQUIPMENT: ONLY if smoke/fire/leak/gauge-red is clearly visible\n"
+            "  - LOGISTICS: real congestion or near-miss, not routine traffic\n\n"
+            "deploy=none unless event_detected=true with evidence.\n"
+            "  'safety' | 'quality' | 'inventory' | 'maintenance' | 'dispatch' | 'none'\n\n"
+            "Return JSON: {\"summary\": str, \"event_detected\": bool, "
+            "\"event_type\": snake_case label, "
+            "\"severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL', "
+            "\"deploy\": one of safety|quality|inventory|maintenance|dispatch|none, "
+            "\"reasoning\": specific visible evidence only}"
+            % (EVIDENCE_RULES, cv_block)
         )
         obs = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
                       system=self.PERSONA)
@@ -119,46 +135,45 @@ class ShiftSupervisor:
         obs.setdefault("severity", "MED")
         obs.setdefault("deploy", "none")
         obs.setdefault("reasoning", "")
-        # tolerate the model returning deploy as a list (brief asked for a list)
         if isinstance(obs["deploy"], list):
             obs["deploy"] = obs["deploy"][0] if obs["deploy"] else "none"
         return obs
 
 
 # =============================================================================
-# 2. Safety Officer — EHS subagent (Role 01)
+# Role 01 — Safety Officer
 # =============================================================================
 
 class SafetyOfficer:
     PERSONA = (
         "You are a certified factory SAFETY OFFICER (EHS). You confirm hazards "
-        "from camera frames, classify them by OSHA category and severity, and "
-        "protect people first. You are precise about OSHA codes and you do not "
-        "cry wolf — severity must match what is actually visible."
+        "from camera frames, classify OSHA category and severity, and protect "
+        "people first. You do not cry wolf."
     )
 
     def handle(self, frame_paths, event):
+        cv_block = ""
+        cv_scan = event.get("cv_scan")
+        if cv_scan:
+            cv_block = "\n\nTRAINED PPE DETECTOR:\n" + format_for_vlm(cv_scan) + "\n"
         prompt = (
-            "The shift supervisor deployed you for a possible safety hazard in "
-            "these time-ordered frames:\n  event_type: %s\n  supervisor_note: %s"
-            "\n\nConfirm the hazard from the images and classify it.\n\n%s\n\n"
-            "Severity guide: LOW=minor/no injury, MED=could cause injury, "
-            "HIGH=likely serious injury, CRITICAL=imminent danger to life.\n\n"
-            "Return JSON with exactly: "
-            "{\"hazard\": short hazard name, "
-            "\"severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL', "
-            "\"location\": best guess of plant location e.g. 'Aisle B / Line 2', "
-            "\"osha_category\": the single best-fit code+name from the list, "
-            "\"corrective_action\": the immediate corrective action, "
-            "\"slack_message\": one-line #safety-floor alert, "
-            "\"reasoning\": why this classification fits the evidence}"
-            % (event.get("event_type"),
+            "%s%s\n\n"
+            "TRAINED PPE DETECTOR output is authoritative for helmet/vest compliance.\n\n"
+            "Supervisor deployed you for a possible safety hazard:\n"
+            "  event_type: %s\n  note: %s\n\n"
+            "Confirm ONLY if clearly visible in frames. If not visible, set "
+            "\"hazard\": \"none_confirmed\", \"severity\": \"LOW\", and explain in "
+            "reasoning that evidence is insufficient.\n\n%s\n\n"
+            "Return JSON: {\"hazard\": str, \"severity\": str, "
+            "\"location\": str, \"osha_category\": str, "
+            "\"corrective_action\": str, \"slack_message\": str, "
+            "\"reasoning\": str, \"clearly_visible\": bool}"
+            % (EVIDENCE_RULES, cv_block, event.get("event_type"),
                event.get("reasoning") or event.get("summary"),
                OSHA_REFERENCE)
         )
         vlm_out = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
                           system=self.PERSONA)
-
         incident = make_safetyculture_incident(
             hazard=vlm_out.get("hazard", event.get("event_type")),
             severity=vlm_out.get("severity", event.get("severity")),
@@ -167,50 +182,147 @@ class SafetyOfficer:
         )
         if vlm_out.get("corrective_action"):
             incident["corrective_action"] = vlm_out["corrective_action"]
-
         return {
             "system": "safety",
             "role": "Safety Officer",
+            "icon": "🦺",
             "vlm": vlm_out,
             "record": incident,
             "slack_message": vlm_out.get(
                 "slack_message", "Safety hazard: %s" % incident["hazard_type"]),
+            "slack_channel": "#safety-floor",
         }
 
 
 # =============================================================================
-# 3. Maintenance Technician — subagent (Role 05)
+# Role 02 — Quality Inspector
 # =============================================================================
 
-class MaintenanceTech:
+class QualityInspector:
     PERSONA = (
-        "You are a senior MAINTENANCE TECHNICIAN. You diagnose equipment faults "
-        "from camera frames — smoke from a machine, gauges in the red, leaks, "
-        "stalled or struggling lines — and you prioritize repairs by real "
-        "operational impact. You think in assets, root cause, and downtime."
+        "You are a QC INSPECTOR on the production floor. You inspect parts and "
+        "batches against spec, name defects on rejects, and quarantine bad stock "
+        "when a line drifts. You think in first-pass yield and CAPA."
     )
 
     def handle(self, frame_paths, event):
         prompt = (
-            "The shift supervisor deployed you for a possible equipment fault in "
-            "these time-ordered frames:\n  event_type: %s\n  supervisor_note: %s"
-            "\n\nRead any gauges, warning lights, smoke, leaks, or abnormal "
-            "motion across the frames. Identify the likely asset and propose a "
-            "repair.\n\nPriority guide: 1=line down/safety, 2=urgent, "
-            "3=schedule soon, 4=routine.\n\n"
-            "Return JSON with exactly: "
-            "{\"asset_id\": plausible tag e.g. 'PMP-204' or 'MTR-118', "
-            "\"fault\": concise fault description, "
-            "\"repair\": recommended corrective action, "
-            "\"priority\": integer 1-4, "
-            "\"slack_message\": one-line #maintenance note, "
-            "\"reasoning\": the temporal evidence (what changed across frames)}"
+            "Supervisor deployed you for a possible quality issue:\n"
+            "  event_type: %s\n  note: %s\n\n"
+            "Inspect the frames for visible defects, misassembly, damaged "
+            "packaging, contamination, or line drift.\n\n"
+            "Return JSON: {\"defect\": short name, "
+            "\"severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL', "
+            "\"batch_id\": best guess e.g. 'LOT-4421', "
+            "\"disposition\": 'QUARANTINE'|'REWORK'|'SCRAP'|'HOLD', "
+            "\"corrective_action\": immediate step, "
+            "\"slack_message\": one-line #quality-line alert, "
+            "\"reasoning\": evidence across frames}"
             % (event.get("event_type"),
                event.get("reasoning") or event.get("summary"))
         )
         vlm_out = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
                           system=self.PERSONA)
+        ncr = make_mastercontrol_reject(
+            defect=vlm_out.get("defect", event.get("event_type")),
+            severity=vlm_out.get("severity", event.get("severity")),
+            batch_id=vlm_out.get("batch_id"),
+            disposition=vlm_out.get("disposition", "QUARANTINE"),
+        )
+        if vlm_out.get("corrective_action"):
+            ncr["corrective_action"] = vlm_out["corrective_action"]
+        return {
+            "system": "quality",
+            "role": "Quality Inspector",
+            "icon": "🔬",
+            "vlm": vlm_out,
+            "record": ncr,
+            "slack_message": vlm_out.get(
+                "slack_message", "Quality reject: %s" % ncr["defect_type"]),
+            "slack_channel": "#quality-line",
+        }
 
+
+# =============================================================================
+# Role 04 — Inventory Clerk
+# =============================================================================
+
+class InventoryClerk:
+    PERSONA = (
+        "You are an INVENTORY CLERK keeping system stock aligned with the floor. "
+        "You flag damage, miscounts, misplacement, blocked pick faces, and "
+        "near-expiry risk. You enforce FEFO and keep records audit-ready."
+    )
+
+    def handle(self, frame_paths, event):
+        prompt = (
+            "Supervisor deployed you for a possible inventory issue:\n"
+            "  event_type: %s\n  note: %s\n\n"
+            "Look for damaged cartons, wrong placement, overstacking, blocked "
+            "aisles, label/batch issues, empty pick faces vs overflow.\n\n"
+            "Return JSON: {\"issue\": short issue name, "
+            "\"sku\": best guess SKU or pallet ID, "
+            "\"location\": aisle/bin e.g. 'Aisle C / Bin 12', "
+            "\"variance_units\": integer estimate of units affected (0 if unknown), "
+            "\"severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL', "
+            "\"corrective_action\": immediate step, "
+            "\"slack_message\": one-line #inventory alert, "
+            "\"reasoning\": evidence}"
+            % (event.get("event_type"),
+               event.get("reasoning") or event.get("summary"))
+        )
+        vlm_out = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
+                          system=self.PERSONA)
+        flag = make_wms_inventory_flag(
+            issue=vlm_out.get("issue", event.get("event_type")),
+            sku=vlm_out.get("sku"),
+            location=vlm_out.get("location"),
+            variance=vlm_out.get("variance_units", 0),
+        )
+        flag["severity"] = vlm_out.get("severity", event.get("severity", "MED"))
+        if vlm_out.get("corrective_action"):
+            flag["corrective_action"] = vlm_out["corrective_action"]
+        return {
+            "system": "inventory",
+            "role": "Inventory Clerk",
+            "icon": "📦",
+            "vlm": vlm_out,
+            "record": flag,
+            "slack_message": vlm_out.get(
+                "slack_message", "Inventory flag: %s" % flag["issue_type"]),
+            "slack_channel": "#inventory",
+        }
+
+
+# =============================================================================
+# Role 05 — Maintenance Technician
+# =============================================================================
+
+class MaintenanceTech:
+    PERSONA = (
+        "You are a senior MAINTENANCE TECHNICIAN. You diagnose equipment faults "
+        "from camera frames and prioritize by operational impact and downtime."
+    )
+
+    def handle(self, frame_paths, event):
+        prompt = (
+            "%s\n\n"
+            "Supervisor deployed you for a possible equipment fault:\n"
+            "  event_type: %s\n  note: %s\n\n"
+            "Read gauges, warning lights, smoke, leaks, abnormal motion.\n"
+            "Do NOT report smoke unless you see distinct smoke plumes in the "
+            "frames — fog machines, dust, and haze are not equipment faults.\n"
+            "If no fault is clearly visible, set \"fault\": \"no_fault_confirmed\" "
+            "and \"clearly_visible\": false.\n\n"
+            "Priority: 1=line down/safety, 2=urgent, 3=schedule soon, 4=routine.\n\n"
+            "Return JSON: {\"asset_id\": tag, \"fault\": str, \"repair\": str, "
+            "\"priority\": 1-4, \"slack_message\": str, \"reasoning\": str, "
+            "\"clearly_visible\": bool}"
+            % (EVIDENCE_RULES, event.get("event_type"),
+               event.get("reasoning") or event.get("summary"))
+        )
+        vlm_out = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
+                          system=self.PERSONA)
         wo = make_maximo_work_order(
             asset_id=vlm_out.get("asset_id", "ASSET-UNKNOWN"),
             fault=vlm_out.get("fault", event.get("event_type")),
@@ -220,53 +332,104 @@ class MaintenanceTech:
         if vlm_out.get("repair"):
             wo["description"] = "%s | Recommended: %s" % (
                 wo["description"], vlm_out["repair"])
-
         return {
             "system": "maintenance",
             "role": "Maintenance Technician",
+            "icon": "🔧",
             "vlm": vlm_out,
             "record": wo,
             "slack_message": vlm_out.get(
                 "slack_message", "Equipment fault: %s" % wo["description"]),
+            "slack_channel": "#maintenance",
         }
 
 
 # =============================================================================
-# 4. Critic — the autonomy gate
+# Role 06 — Floor Dispatcher (custom BYO role)
+# =============================================================================
+
+class FloorDispatcher:
+    PERSONA = (
+        "You are the FLOOR DISPATCHER coordinating vehicles, docks, and pedestrian "
+        "flow on a busy plant floor. You prevent near-misses, clear staging "
+        "bottlenecks, and keep forklifts on safe routes. You think in zones, "
+        "clearance, and throughput."
+    )
+
+    def handle(self, frame_paths, event):
+        prompt = (
+            "Supervisor deployed you for a logistics / vehicle-flow issue:\n"
+            "  event_type: %s\n  note: %s\n\n"
+            "Assess forklift paths, dock congestion, pedestrian crossings, "
+            "staging backups, and near-miss situations across the frames.\n\n"
+            "Return JSON: {\"alert_type\": short label e.g. 'near_miss' or "
+            "'dock_congestion', "
+            "\"zone\": plant zone e.g. 'Dock 3 / Cross-aisle B', "
+            "\"vehicle_id\": forklift or truck ID if visible else 'UNKNOWN', "
+            "\"recommended_action\": immediate dispatch instruction, "
+            "\"severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL', "
+            "\"slack_message\": one-line #dispatch alert, "
+            "\"reasoning\": evidence}"
+            % (event.get("event_type"),
+               event.get("reasoning") or event.get("summary"))
+        )
+        vlm_out = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
+                          system=self.PERSONA)
+        alert = make_dispatch_alert(
+            alert_type=vlm_out.get("alert_type", event.get("event_type")),
+            zone=vlm_out.get("zone"),
+            vehicle=vlm_out.get("vehicle_id"),
+            action=vlm_out.get("recommended_action"),
+        )
+        alert["severity"] = vlm_out.get("severity", event.get("severity", "MED"))
+        return {
+            "system": "dispatch",
+            "role": "Floor Dispatcher",
+            "icon": "🚛",
+            "vlm": vlm_out,
+            "record": alert,
+            "slack_message": vlm_out.get(
+                "slack_message", "Dispatch alert: %s" % alert["alert_type"]),
+            "slack_channel": "#dispatch-floor",
+        }
+
+
+# =============================================================================
+# Critic — autonomy gate
 # =============================================================================
 
 class Critic:
     PERSONA = (
-        "You are an independent QUALITY CRITIC auditing automated actions before "
-        "they commit to real factory systems. You are skeptical but fair. You "
-        "APPROVE actions whose hazard/fault is clearly visible and reasonably "
-        "classified. You HOLD (reject) only when the evidence does not support "
-        "the claim, the severity is grossly wrong, or the wrong system was "
-        "chosen. A small severity tweak does not require a rejection."
+        "You are an independent CRITIC auditing automated actions before they "
+        "commit to real factory systems. You are skeptical — when in doubt, HOLD. "
+        "APPROVE only when the claimed hazard/fault is unmistakably visible in "
+        "the frames. Reject hallucinated smoke, fire, leaks, and routine forklift "
+        "traffic dressed up as incidents."
     )
 
+    SYSTEM_LABELS = {
+        "safety": "SafetyCulture (people-safety incident)",
+        "quality": "MasterControl (quality NCR / quarantine)",
+        "inventory": "Manhattan WMS (inventory flag)",
+        "maintenance": "Maximo (equipment work order)",
+        "dispatch": "TMS dispatch board (vehicle/logistics alert)",
+    }
+
     def review(self, proposed_action, frame_paths):
-        record = proposed_action["record"]
         system = proposed_action["system"]
-        target = ("SafetyCulture (a people-safety incident)"
-                  if system == "safety"
-                  else "Maximo (an equipment work order)")
+        target = self.SYSTEM_LABELS.get(system, system)
         prompt = (
-            "Audit this automated action against the camera frames before it "
-            "commits. Rubric:\n"
-            "  1. Is the claimed hazard/fault ACTUALLY visible in the frames?\n"
-            "  2. Is the severity appropriate (not grossly over/understated)?\n"
-            "  3. Is the target system correct? This action targets %s.\n\n"
-            "Approve if it is broadly correct (a one-level severity tweak is "
-            "fine via adjusted_severity). Hold only if the claim is not "
-            "supported, severity is off by 2+ levels, or the wrong system was "
-            "chosen.\n\nProposed action:\n%s\n\n"
-            "Return JSON with exactly: "
-            "{\"approved\": bool, "
-            "\"reason\": concise verdict against the rubric, "
-            "\"adjusted_severity\": one of 'LOW','MED','HIGH','CRITICAL' if a "
-            "minor correction helps, else null}"
-            % (target, json.dumps(record, indent=2))
+            "%s\n\n"
+            "Audit this automated action against the camera frames.\n"
+            "  1. Is the claimed issue UNMISTAKABLY visible? If not → approved=false\n"
+            "  2. Is severity appropriate?\n"
+            "  3. Is target system correct? → %s\n\n"
+            "Reject smoke/fire/leak/work-order claims unless you can point to "
+            "specific visual proof in the frames.\n\n"
+            "Proposed:\n%s\n\n"
+            "Return JSON: {\"approved\": bool, \"reason\": str, "
+            "\"adjusted_severity\": 'LOW'|'MED'|'HIGH'|'CRITICAL' or null}"
+            % (EVIDENCE_RULES, target, json.dumps(proposed_action["record"], indent=2))
         )
         verdict = ask_vlm(prompt, image_paths=frame_paths, json_mode=True,
                           system=self.PERSONA)
@@ -277,46 +440,62 @@ class Critic:
 
 
 # =============================================================================
-# commit helpers
+# Agent instances
 # =============================================================================
 
-def _commit_safety(action):
-    path = _append_json("incidents.json", action["record"])
-    return path
+_AGENTS = {
+    "safety": SafetyOfficer(),
+    "quality": QualityInspector(),
+    "inventory": InventoryClerk(),
+    "maintenance": MaintenanceTech(),
+    "dispatch": FloorDispatcher(),
+}
+
+_COMMIT_FILES = {k: v[4] for k, v in ROUTE_MAP.items()}
 
 
-def _commit_maintenance(action):
-    path = _append_json("work_orders.json", action["record"])
-    return path
+def clear_shift_output():
+    """Wipe prior shift artifacts so each run only shows THIS session's writes."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    for fname in set(_COMMIT_FILES.values()) | {"shift_handoff.md"}:
+        path = os.path.join(OUTPUT_DIR, fname)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _commit_action(action):
+    fname = _COMMIT_FILES.get(action["system"], "events.json")
+    return _append_json(fname, action["record"])
 
 
 def _apply_adjustment(action, adjusted):
-    """Apply a critic severity tweak to the record before commit."""
     if not adjusted:
         return
+    rec = action["record"]
+    if "severity" in rec:
+        rec["severity"] = adjusted
     if action["system"] == "safety":
-        action["record"]["severity"] = adjusted
-        action["record"]["osha_recordable"] = adjusted in ("HIGH", "CRITICAL")
+        rec["osha_recordable"] = adjusted in ("HIGH", "CRITICAL")
 
 
 # =============================================================================
-# THE SHIFT LOOP — shared by run.py (console) and app.py (UI)
+# THE SHIFT LOOP
 # =============================================================================
 
-def run_shift(sequences, emit=None):
-    """
-    Run the full autonomous shift over `sequences` (list of (name, [paths])).
-    Fires `emit(event_dict)` for every step so a UI/console can render live.
-    Returns a results dict with events, incidents, work_orders, handoff, stats.
-    """
+def run_shift(sequences, emit=None, fresh_output=True):
+    if fresh_output:
+        clear_shift_output()
+
     supervisor = ShiftSupervisor()
-    safety = SafetyOfficer()
-    maint = MaintenanceTech()
     critic = Critic()
 
     events = []
     committed = 0
     held = 0
+    all_writes = {k: [] for k in _COMMIT_FILES}
 
     _emit(emit, "shift_start", total=len(sequences),
           sequences=[s for s, _ in sequences])
@@ -325,9 +504,26 @@ def run_shift(sequences, emit=None):
         _emit(emit, "moment_start", seq=seq, index=idx,
               total=len(sequences), frames=frames)
 
-        # 1. supervisor temporal observation
+        _emit(emit, "cv_scanning", seq=seq)
+        cv_scan = scan_frames(frames)
+        _emit(emit, "cv_scan", seq=seq, scan=cv_scan)
+
         _emit(emit, "supervisor_thinking", seq=seq)
-        obs = supervisor.observe(frames)
+        obs = supervisor.observe(frames, cv_scan=cv_scan)
+
+        # If trained detector found PPE violations, ensure safety review
+        if cv_scan.get("critical") and not obs.get("event_detected"):
+            obs["event_detected"] = True
+            obs["deploy"] = "safety"
+            obs["event_type"] = obs.get("event_type") or "ppe_violation"
+            obs["severity"] = "HIGH"
+            if any("Fall" in v for v in cv_scan.get("violation_types", [])):
+                obs["severity"] = "CRITICAL"
+            obs["reasoning"] = (
+                (obs.get("reasoning") or "") + " | PPE detector: "
+                + cv_scan.get("summary", ""))[:500]
+            obs["summary"] = cv_scan.get("summary", obs.get("summary", ""))
+        obs["cv_scan"] = cv_scan
         _emit(emit, "supervisor_observe", seq=seq, obs=obs)
 
         record = {
@@ -342,28 +538,36 @@ def run_shift(sequences, emit=None):
             events.append(record)
             continue
 
-        # 2. supervisor DEPLOYS a subagent (made explicit + visible)
-        if route == "safety":
-            _emit(emit, "deploy", role="Safety Officer", icon="🦺",
-                  reason=obs.get("reasoning"), seq=seq)
-            action = safety.handle(frames, obs)
-            commit_fn = _commit_safety
-        elif route == "maintenance":
-            _emit(emit, "deploy", role="Maintenance Technician", icon="🔧",
-                  reason=obs.get("reasoning"), seq=seq)
-            action = maint.handle(frames, obs)
-            commit_fn = _commit_maintenance
-        else:
+        if route not in _AGENTS:
             _emit(emit, "hold", seq=seq, reason="unknown route '%s'" % route)
             record["held_reason"] = "unknown route"
             held += 1
             events.append(record)
             continue
 
-        _emit(emit, "subagent_propose", seq=seq, system=action["system"],
-              role=action["role"], action=action)
+        meta = ROUTE_MAP[route]
+        _emit(emit, "deploy", role=meta[2], icon=meta[3],
+              reason=obs.get("reasoning"), seq=seq, route=route)
+        action = _AGENTS[route].handle(frames, obs)
+        vlm = action.get("vlm") or {}
+        if vlm.get("clearly_visible") is False:
+            record["held_reason"] = "Specialist could not confirm issue in frames."
+            held += 1
+            _emit(emit, "hold", seq=seq,
+                  reason=record["held_reason"], action=action)
+            events.append(record)
+            continue
+        if vlm.get("hazard") == "none_confirmed" or vlm.get("fault") == "no_fault_confirmed":
+            record["held_reason"] = "No confirmed hazard/fault in frames."
+            held += 1
+            _emit(emit, "hold", seq=seq,
+                  reason=record["held_reason"], action=action)
+            events.append(record)
+            continue
 
-        # 3. critic independently reviews
+        _emit(emit, "subagent_propose", seq=seq, system=action["system"],
+              role=action["role"], icon=action.get("icon", "🤖"), action=action)
+
         _emit(emit, "critic_thinking", seq=seq)
         verdict = critic.review(action, frames)
         _emit(emit, "critic_verdict", seq=seq, verdict=verdict)
@@ -372,15 +576,16 @@ def run_shift(sequences, emit=None):
             _apply_adjustment(action, verdict["adjusted_severity"])
             record["severity"] = verdict["adjusted_severity"]
 
-        # 4. commit only if approved
         if verdict.get("approved"):
-            commit_fn(action)
+            _commit_action(action)
+            all_writes[route].append(action["record"])
             record["committed"] = True
             record["committed_severity"] = record["severity"]
             record["record"] = action["record"]
             committed += 1
             _emit(emit, "commit", seq=seq, system=action["system"],
-                  record=action["record"], slack_message=action["slack_message"])
+                  record=action["record"], slack_message=action["slack_message"],
+                  slack_channel=action.get("slack_channel", "#floor"))
         else:
             record["held_reason"] = verdict.get("reason")
             held += 1
@@ -389,29 +594,50 @@ def run_shift(sequences, emit=None):
 
         events.append(record)
 
-    # --- handoff --------------------------------------------------------------
-    incidents = _load_json("incidents.json")
-    work_orders = _load_json("work_orders.json")
+    session_incidents = all_writes["safety"]
+    session_ncrs = all_writes["quality"]
+    session_flags = all_writes["inventory"]
+    session_work_orders = all_writes["maintenance"]
+    session_dispatches = all_writes["dispatch"]
+
     _emit(emit, "handoff_thinking")
-    handoff = generate_handoff(events, incidents, work_orders)
+    handoff = generate_handoff(
+        events, session_incidents, session_work_orders,
+        session_ncrs, session_flags, session_dispatches)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(os.path.join(OUTPUT_DIR, "shift_handoff.md"), "w") as fh:
         fh.write(handoff)
 
     total_actionable = committed + held
     autonomy = (committed / total_actionable * 100) if total_actionable else 100.0
-    stats = {"moments": len(sequences), "committed": committed,
-             "held": held, "autonomy": autonomy,
-             "severity_rollup": _severity_rollup(events)}
+    stats = {
+        "moments": len(sequences), "committed": committed,
+        "held": held, "autonomy": autonomy,
+        "severity_rollup": _severity_rollup(events),
+        "writes": {
+            "incidents": len(session_incidents),
+            "work_orders": len(session_work_orders),
+            "quality_ncrs": len(session_ncrs),
+            "inventory_flags": len(session_flags),
+            "dispatch_alerts": len(session_dispatches),
+        },
+    }
 
     _emit(emit, "shift_end", stats=stats, handoff=handoff,
-          incidents=incidents, work_orders=work_orders)
+          incidents=session_incidents, work_orders=session_work_orders,
+          quality_ncrs=session_ncrs, inventory_flags=session_flags,
+          dispatch_alerts=session_dispatches)
 
-    return {"events": events, "incidents": incidents,
-            "work_orders": work_orders, "handoff": handoff, "stats": stats}
+    return {
+        "events": events,
+        "incidents": session_incidents,
+        "work_orders": session_work_orders,
+        "quality_ncrs": session_ncrs,
+        "inventory_flags": session_flags,
+        "dispatch_alerts": session_dispatches,
+        "handoff": handoff, "stats": stats,
+    }
 
-
-# --- handoff + rollup --------------------------------------------------------
 
 def _load_json(filename):
     path = os.path.join(OUTPUT_DIR, filename)
@@ -434,27 +660,36 @@ def _severity_rollup(events):
     return ", ".join(parts) if parts else "none"
 
 
-def generate_handoff(events, incidents=None, work_orders=None):
+def generate_handoff(events, incidents=None, work_orders=None,
+                     quality_ncrs=None, inventory_flags=None,
+                     dispatch_alerts=None):
     incidents = incidents if incidents is not None else _load_json("incidents.json")
-    work_orders = (work_orders if work_orders is not None
-                   else _load_json("work_orders.json"))
+    work_orders = work_orders if work_orders is not None else _load_json("work_orders.json")
+    quality_ncrs = quality_ncrs if quality_ncrs is not None else _load_json("quality_ncrs.json")
+    inventory_flags = (inventory_flags if inventory_flags is not None
+                     else _load_json("inventory_flags.json"))
+    dispatch_alerts = (dispatch_alerts if dispatch_alerts is not None
+                       else _load_json("dispatch_alerts.json"))
     context = {
         "shift_events": events,
         "safety_incidents": incidents,
+        "quality_ncrs": quality_ncrs,
+        "inventory_flags": inventory_flags,
         "maintenance_work_orders": work_orders,
+        "dispatch_alerts": dispatch_alerts,
     }
     prompt = (
-        "Write the end-of-shift handoff for the supervisor taking over, using "
-        "the structured shift data below. Concise, professional Markdown a real "
-        "supervisor would actually hand off. Use these exact section headers:\n"
+        "Write the end-of-shift handoff for the supervisor taking over. "
+        "Professional Markdown. Headers:\n"
         "  # End-of-Shift Handoff\n"
-        "  **Headline:** one sentence on how the shift went\n"
-        "  ## Incidents (count + severity rollup)\n"
-        "  ## Work Orders Raised\n"
-        "  ## Open Items\n"
+        "  **Headline:** one sentence\n"
+        "  ## Safety Incidents\n"
+        "  ## Quality NCRs\n"
+        "  ## Inventory Flags\n"
+        "  ## Work Orders\n"
+        "  ## Dispatch Alerts\n"
         "  ## Watch-Items for Next Shift\n\n"
-        "Reference IDs (incident_id / wonum) where useful. Do not invent data "
-        "that is not present.\n\nShift data (JSON):\n%s"
+        "Reference IDs where useful. Do not invent data.\n\n%s"
         % json.dumps(context, indent=2)
     )
     return ask_vlm(prompt, image_paths=None, json_mode=False,

@@ -82,8 +82,10 @@ def console_emit(ev):
         print("     reason: %s" % ev["reason"])
     elif k == "subagent_propose":
         v = ev["action"]["vlm"]
+        icons = {"safety": "🦺", "quality": "🔬", "inventory": "📦",
+                 "maintenance": "🔧", "dispatch": "🚛"}
         print("\n  %s %s proposes:"
-              % ("🦺" if ev["system"] == "safety" else "🔧", ev["role"]))
+              % (icons.get(ev["system"], "🤖"), ev["role"]))
         print(json.dumps(v, indent=6)[:700])
     elif k == "critic_thinking":
         print("\n  ⚖️  CRITIC reviewing (independent second opinion)...")
@@ -96,15 +98,22 @@ def console_emit(ev):
     elif k == "commit":
         rec = ev["record"]
         print("\n  ✅ Critic APPROVED — committing to system of record:")
-        if ev["system"] == "safety":
-            print("[#safety-floor] 🚨 %s | severity=%s | %s | OSHA: %s | id=%s"
-                  % (ev["slack_message"], rec["severity"], rec["location"],
-                     rec["osha_category"], rec["incident_id"]))
+        sys = ev["system"]
+        if sys == "safety":
+            print("[#safety-floor] 🚨 %s | id=%s"
+                  % (ev["slack_message"], rec["incident_id"]))
+        elif sys == "quality":
+            print("[#quality-line] 🔬 NCR %s | %s"
+                  % (rec["ncr_id"], rec["defect_type"]))
+        elif sys == "inventory":
+            print("[#inventory] 📦 %s | %s"
+                  % (rec["flag_id"], rec["issue_type"]))
+        elif sys == "dispatch":
+            print("[#dispatch-floor] 🚛 %s | %s"
+                  % (rec["dispatch_id"], rec["alert_type"]))
         else:
-            print("[#maintenance] 🔧 Work order %s created | asset=%s | "
-                  "priority=%s | %s"
-                  % (rec["wonum"], rec["asset_id"], rec["priority"],
-                     ev["slack_message"]))
+            print("[#maintenance] 🔧 WO %s | asset=%s | %s"
+                  % (rec["wonum"], rec["asset_id"], ev["slack_message"]))
     elif k == "hold":
         print("\n  ✋ Action HELD for human review (critic rejected).")
         print("     reason: %s" % ev["reason"])
@@ -114,7 +123,7 @@ def console_emit(ev):
 # --- main --------------------------------------------------------------------
 
 def main():
-    banner("FACTORY SHIFT SUPERVISOR AGENT — 3-AGENT CREW", "🏭")
+    banner("ZAPDOS LABS — 6-AGENT FLOOR CREW", "⚡")
     print("  A frontier VLM orchestrates a crew, live, over time.")
     print("  No training, no hardcoded vision rules — reasoning happens now.")
     print("  Model: %s" % os.environ.get("VLLM_MODEL", "(unset)"))

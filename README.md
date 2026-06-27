@@ -1,55 +1,48 @@
-# 🧠 CORTEX — Autonomous Floor Command
+# ⚡ ZAPDOS LABS — Autonomous Floor Command
 
-A frontier **Vision-Language Model** (Qwen3-VL) orchestrates a **3-agent crew**
-that autonomously runs a factory shift from a camera feed. Cortex watches the
-floor over time, deploys specialists, audits its own decisions, and writes into
-real factory systems (Maximo, SafetyCulture).
+Six industrial agents orchestrated by a frontier **Qwen3-VL** model over live CCTV.
+Watch → Decide → Act → Report. Every decision is a live VLM call — no hardcoded vision rules.
 
-**We didn't train a model — we built a brain that runs the floor.** Every
-decision is a live VLM call happening right now, on these frames. No training,
-no hardcoded rules on pixels.
+## The crew (6 floor roles)
 
-## The crew
+| # | Agent | System | Does |
+|---|-------|--------|------|
+| 01 | 🦺 **Safety Officer** | SafetyCulture | PPE, hazards, OSHA incidents |
+| 02 | 🔬 **Quality Inspector** | MasterControl | Defects, quarantine, NCRs |
+| 03 | 🎯 **Shift Supervisor** | — | Orchestrator: watches feed, deploys specialists |
+| 04 | 📦 **Inventory Clerk** | Manhattan WMS | Damage, miscounts, FEFO flags |
+| 05 | 🔧 **Maintenance Tech** | Maximo | Equipment faults, work orders |
+| 06 | 🚛 **Floor Dispatcher** | TMS | Forklift/pedestrian conflicts, dock flow |
 
-| Agent | Role | Does |
-|-------|------|------|
-| 🎯 **Shift Supervisor** | orchestrator | Watches the feed, reasons about change over time, **deploys** a specialist |
-| 🦺 **Safety Officer** | EHS | Confirms hazard, classifies OSHA category + severity, writes a **SafetyCulture** incident |
-| 🔧 **Maintenance Tech** | maintenance | Diagnoses equipment fault, sets priority 1–4, writes a **Maximo** work order |
-| ⚖️ **Critic** | autonomy gate | Independent 2nd VLM call: approves or **holds for human** before any commit |
+Plus **⚖️ Critic** — independent VLM audit before any system write.
 
 ## Run it
 
 ```bash
 pip install -r requirements.txt
-# put your keys in .env (VLLM_URL / VLLM_KEY / VLLM_MODEL)
+cp .env.example .env   # add VLLM_URL, VLLM_KEY, VLLM_MODEL
 
-python3 -m streamlit run app.py   # 🧠 CORTEX control room (the centerpiece)
-python3 run.py                    # terminal demo of the same shift loop
+python3 -m streamlit run app.py   # dashboard (upload CCTV clip)
+python3 run.py                    # terminal demo on data/ frames
 ```
 
-**Using the dashboard:** drop a warehouse/factory clip into the upload zone (or
-flip on **Use sample footage**), then hit **▶ START SHIFT**. Watch the camera
-feed scan frames, the orchestration diagram light up as the Supervisor deploys
-subagents, incident/work-order cards appear in real time, and the end-of-shift
-handoff render at the bottom (with a one-click `.md` export).
+**Dashboard:** upload a factory clip (or use sample frames in `data/`), hit **▶ START SHIFT**.
+Video plays while agents scan frames, the hub lights up, and incidents/NCRs/WOs land on the board.
 
-## 🎤 What to say to the judges
+## Demo pitch (30 sec)
 
-- **"We didn't train anything — we built a brain that runs the floor."** The reasoning you're watching is happening live, right now, on these frames. That survives every follow-up question.
-- **"It reasons over time, not single frames."** The supervisor sees the whole sequence and explains what *changed* — that's how it catches a hazard as it develops.
-- **"Watch it deploy specialists."** Supervisor spots the event → the orchestration graph lights up → the Safety Officer or Maintenance Tech writes a real incident or work order.
-- **"There's a critic, so automation is safe."** A second independent VLM call signs off before anything commits; rejected actions are held for a human — that's the 90–95% autonomy story.
+1. *"We didn't train a model — we built a brain that runs the floor."*
+2. *"Six specialists, one supervisor, one critic — all reasoning live on your CCTV."*
+3. *"Watch it deploy Safety for a missing vest, Quality for a line drift, Dispatch for a near-miss."*
 
 ## Files
 
 | File | Role |
 |------|------|
-| `app.py` | **CORTEX control room** — video upload, animated agent orchestration, live incident/WO cards, handoff (the showpiece) |
-| `run.py` | Terminal demo over the same shift loop |
-| `agents.py` | The 3-agent crew + critic + shared `run_shift()` loop |
-| `vlm.py` | `ask_vlm()` — base64 frames, OpenAI chat POST, personas, JSON mode + retries |
-| `video.py` | `extract_frames()` — sample a CCTV clip into `seqN_NN.jpg` frames |
-| `schemas.py` | Maximo work order + SafetyCulture incident record builders |
-| `data/` | Sample input frames (`seqN_NN.jpg`) |
-| `output/` | Generated incidents, work orders, handoff report |
+| `app.py` | Zapdos-themed control room UI |
+| `agents.py` | 6 agents + critic + `run_shift()` |
+| `vlm.py` | OpenAI-compatible VLM client |
+| `video.py` | Frame extraction + live overlay |
+| `schemas.py` | Factory system record builders |
+| `data/` | Sample frames (`seqN_NN.jpg`) |
+| `output/` | Committed records + handoff |

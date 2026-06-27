@@ -2,3 +2,5 @@ requests
 python-dotenv
 opencv-python
 streamlit
+ultralytics
+huggingface_hub
