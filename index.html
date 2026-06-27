@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zapdos Labs — Autonomous Floor Command</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(160deg, #f8fafc 0%, #e2e8f0 100%);
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    main {
+      max-width: 42rem;
+      background: #fff;
+      border-radius: 1rem;
+      padding: 2.5rem;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.08);
+      border: 1px solid #e2e8f0;
+    }
+    h1 { margin: 0 0 0.5rem; font-size: 1.75rem; }
+    .tag { color: #b45309; font-weight: 600; letter-spacing: 0.04em; font-size: 0.8rem; text-transform: uppercase; }
+    p { line-height: 1.6; color: #475569; }
+    a.btn {
+      display: inline-block;
+      margin-top: 1.25rem;
+      padding: 0.85rem 1.4rem;
+      background: #f59e0b;
+      color: #0f172a;
+      text-decoration: none;
+      font-weight: 700;
+      border-radius: 0.5rem;
+    }
+    a.btn:hover { background: #d97706; }
+    code { background: #f1f5f9; padding: 0.15rem 0.4rem; border-radius: 0.25rem; font-size: 0.9em; }
+    ul { color: #475569; line-height: 1.7; }
+    .note {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 0.5rem;
+      font-size: 0.9rem;
+      color: #92400e;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="tag">Zapdos Labs</div>
+    <h1>Autonomous Floor Command</h1>
+    <p>
+      Six industrial AI agents orchestrated by a vision-language model over factory CCTV.
+      Watch → Decide → Act → Report.
+    </p>
+    <ul>
+      <li>🦺 Safety · 🔬 Quality · 🎯 Supervisor · 📦 Inventory · 🔧 Maintenance · 🚛 Dispatch</li>
+      <li>Live frame analysis, ranked alerts, and end-of-shift reports</li>
+    </ul>
+    <div class="note">
+      GitHub Pages hosts this landing page only. The interactive dashboard (Streamlit + VLM + PPE)
+      runs on Streamlit Cloud — GitHub cannot run Python apps on <code>.github.io</code>.
+    </div>
+    <a class="btn" href="https://share.streamlit.io/deploy?repository=HaashirAzimi/temp_antler&branch=main&mainModule=app.py" target="_blank" rel="noopener">
+      Deploy / open dashboard on Streamlit →
+    </a>
+    <p style="margin-top: 2rem; font-size: 0.85rem;">
+      Repo: <a href="https://github.com/HaashirAzimi/temp_antler">github.com/HaashirAzimi/temp_antler</a>
+    </p>
+  </main>
+</body>
+</html>
